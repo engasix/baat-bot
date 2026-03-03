@@ -1,6 +1,6 @@
-def main():
-    print("Hello from baat-bot!")
+import asyncio
 
+from services.ari import run
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run())

@@ -65,7 +65,7 @@ product questions via RAG, takes order, confirms delivery address.
 Phase 1  ──►  Install & configure Asterisk
 Phase 2  ──►  Python project setup (uv)
 Phase 3  ──►  Connect Python to Asterisk via ARI
-Phase 4  ──►  RTP audio bridge (hear & send raw audio)
+Phase 4  ──►  RTP audio bridge + TTS welcome message (first audio out)
 Phase 5  ──►  STT — Deepgram streaming (speech → text)
 Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval
 Phase 7  ──►  LangGraph agent (text → Urdu response)
@@ -215,7 +215,7 @@ a different signaling path) and will be resolved in Phase 10 (VPS deployment).
 
 ---
 
-## Phase 2 — Python Project Setup (uv) 🔄 IN PROGRESS
+## Phase 2 — Python Project Setup (uv) ✅ DONE
 
 **Goal:** Python project initialized with uv, all dependencies installed,
 environment variables configured, and folder structure in place.
@@ -306,18 +306,21 @@ baat_bot/
 
 ```
 [✓] uv init done — pyproject.toml exists
-[ ] uv run python -c "import anthropic; print('ok')"
-[ ] uv run python -c "import deepgram; print('ok')"
-[ ] uv run python -c "import langgraph; print('ok')"
-[ ] uv run python -c "import chromadb; print('ok')"
-[ ] uv run python -c "import sentence_transformers; print('ok')"
-[ ] .env has all 7 keys filled in
-[ ] Folder structure created (agent/, services/, rag/, data/)
+[✓] uv run python -c "import anthropic; print('ok')"
+[✓] uv run python -c "import deepgram; print('ok')"
+[✓] uv run python -c "import langgraph; print('ok')"
+[✓] uv run python -c "import chromadb; print('ok')"
+[✓] uv run python -c "import sentence_transformers; print('ok')"
+[✓] Folder structure created (agent/, services/, rag/, data/)
+[✓] ANTHROPIC_API_KEY — filled
+[✓] ARI_URL, ARI_USER, ARI_PASSWORD, RTP_HOST, RTP_PORT — filled
+[~] DEEPGRAM_API_KEY — needs real key
+[~] GOOGLE_APPLICATION_CREDENTIALS — needs service-account.json from Google Cloud
 ```
 
 ---
 
-## Phase 3 — Connect Python to Asterisk via ARI
+## Phase 3 — Connect Python to Asterisk via ARI ✅ DONE
 
 **Goal:** Python app connects to Asterisk ARI WebSocket, receives `StasisStart`
 event when Linphone calls 1000, answers the call, and hangs up cleanly.
@@ -347,21 +350,34 @@ WS     /ari/events                   event stream
 ### Verification
 
 ```
-[ ] uv run python main.py  — logs "Connected to ARI"
-[ ] Dial 1000 from Linphone
-[ ] Console shows: StasisStart event with channel ID
-[ ] Call is answered (Linphone shows "Call in progress")
-[ ] After 3s: call hangs up cleanly
-[ ] Console shows: StasisEnd event
+[✓] uv run python main.py  — logs "Connected to ARI — Asterisk 22.8.2"
+[✓] ARI HTTP GET /ari/asterisk/info → 200 OK
+[✓] Dial 1000 from SIP client
+[✓] Console shows: StasisStart  channel=1772525105.20  caller=1002
+[✓] Call is answered (204)
+[✓] After 3s: call hangs up cleanly (204)
+[✓] Console shows: StasisEnd  channel=1772525105.20
 ```
 
 ---
 
-## Phase 4 — RTP Audio Bridge
+## Phase 4 — RTP Audio Bridge + Welcome Message
 
 **Goal:** Python opens a UDP socket on port 7000. Asterisk streams caller's
-raw audio to it via ExternalMedia. We decode RTP packets and print audio stats
-to confirm audio is flowing. We send silence back so Asterisk keeps the bridge alive.
+raw audio to it via ExternalMedia. Immediately on call answer, the bot plays
+a hardcoded TTS welcome message. We also verify inbound RTP is flowing.
+This establishes both audio directions (in + out) before adding STT/agent logic.
+
+### Welcome message
+
+```
+"Assalam o Alikum, Pure Scents call karny ka buhat shukriya,
+ me Aysha baat kar rahi hon, me aap ki kia madad kar salti hon"
+```
+
+> **Note:** Google TTS `ur-PK-Standard-A` voice works best with Urdu script (نستعلیق).
+> For Phase 4 we use this Roman Urdu string directly to get audio flowing fast.
+> Phase 8 will refine pronunciation using proper Urdu script for agent responses.
 
 ### What `services/rtp.py` contains
 
@@ -378,11 +394,36 @@ to confirm audio is flowing. We send silence back so Asterisk keeps the bridge a
 #   async send(payload: bytes)   send audio back to Asterisk
 ```
 
+### What `services/tts.py` contains (basic, Phase 4 subset)
+
+```python
+# synthesize(text: str) -> bytes
+#   calls Google Cloud TTS (ur-PK-Standard-A, LINEAR16, 16000Hz)
+#   returns raw slin16 PCM bytes (no RTP header)
+#   used to generate welcome message audio at startup
+```
+
+> Full sentence-chunked streaming TTS is added in Phase 8.
+> Phase 4 only needs a single blocking `synthesize()` call.
+
+### Call flow in this phase
+
+```
+Dial 1000
+  → ARI answers call
+  → Create ExternalMedia channel + bridge
+  → synthesize(WELCOME_MESSAGE) → PCM bytes
+  → chunk into 320-byte frames → encode_rtp() → UdpAudioStream.send()
+  → caller hears welcome message
+  → inbound RTP packets logged to console (packet count + payload size)
+  → call stays open until caller hangs up
+```
+
 ### ARI calls added in this phase
 
 ```
 POST /ari/channels/externalMedia
-     body: { app: "baat_bot", external_host: "127.0.0.1:7000", format: "slin16" }
+     body: { app: "baat_bot", external_host: "host.docker.internal:7000", format: "slin16" }
 
 POST /ari/bridges
 POST /ari/bridges/{id}/addChannel   (caller channel + externalMedia channel)
@@ -392,10 +433,11 @@ POST /ari/bridges/{id}/addChannel   (caller channel + externalMedia channel)
 
 ```
 [ ] Dial 1000 — call connects
-[ ] Console prints RTP packet count incrementing (~50 packets/sec for slin16)
+[ ] Caller hears "Assalam o Alikum..." welcome message within ~2s of answering
+[ ] Console prints inbound RTP packet count incrementing (~50 packets/sec)
 [ ] Payload size = 320 bytes  (20ms × 16000Hz × 2 bytes = 640 bytes / 2 = 320)
 [ ] No "bridge dropped" errors in Asterisk console
-[ ] Hang up from Linphone — UDP stream stops cleanly
+[ ] Hang up from caller — UDP stream stops cleanly
 ```
 
 ---
@@ -611,19 +653,18 @@ print(result['messages'][-1].content)
 
 ## Phase 8 — TTS: Google Cloud + Full Pipeline
 
-**Goal:** Agent's Urdu response is synthesized to audio sentence-by-sentence
-via Google Cloud TTS and sent back as RTP. Caller hears the bot speaking Urdu.
-Full end-to-end pipeline works: call → STT → RAG → LangGraph → TTS → caller.
+**Goal:** Extend `services/tts.py` (started in Phase 4) to support streaming
+sentence-by-sentence synthesis. Wire full pipeline: call → STT → RAG → LangGraph → TTS → caller.
+Welcome message from Phase 4 continues to play unchanged.
 
-### What `services/tts.py` contains
+### What `services/tts.py` gains in this phase
 
 ```python
+# (synthesize() already exists from Phase 4 — no changes needed)
+
 # split_sentences(text: str) -> list[str]
 #   splits on: ۔  .  ?  !
-
-# GoogleTTS
-#   voice: ur-PK-Standard-A
-#   async synthesize(sentence: str) -> bytes   returns slin16 PCM
+#   Note: agent responses use Urdu script (نستعلیق) for correct TTS pronunciation
 
 # stream_tts(text: str) -> AsyncGenerator[bytes, None]
 #   splits into sentences → yields PCM per sentence immediately
@@ -635,6 +676,7 @@ Full end-to-end pipeline works: call → STT → RAG → LangGraph → TTS → c
 ```
 Dial 1000
   → ARI answers + bridges ExternalMedia
+  → welcome message plays (from Phase 4, unchanged)
   → receive_task feeds audio to Deepgram via VAD
   → Urdu transcript
   → LangGraph (browsing_node if question → RAG → Claude, else order node)
@@ -647,7 +689,7 @@ Dial 1000
 ### Verification
 
 ```
-[ ] Dial 1000 — hear Urdu greeting in < 2 seconds
+[ ] Dial 1000 — hear welcome message (from Phase 4) immediately ✓
 [ ] Ask "آپ کے پاس کون سی خوشبو ہے؟" → bot replies with perfume names + prices
 [ ] Ask "مردوں کے لیے کیا ہے؟" → bot filters and replies with men's perfumes only
 [ ] Say "Blue de Chanel ایک چاہیے" → bot moves to address collection
@@ -785,9 +827,9 @@ agent/          — zero changes
 | Phase | Builds | Status |
 |---|---|---|
 | 1 | Asterisk Docker + PJSIP + ARI config | ✅ Done |
-| 2 | uv project + folder structure + deps | 🔄 In Progress |
-| 3 | ARI WebSocket — call control | ⬜ Pending |
-| 4 | RTP UDP bridge — raw audio | ⬜ Pending |
+| 2 | uv project + folder structure + deps | ✅ Done |
+| 3 | ARI WebSocket — call control | ✅ Done |
+| 4 | RTP UDP bridge + TTS welcome message | ⬜ Pending |
 | 5 | Deepgram streaming STT + VAD | ⬜ Pending |
 | 6 | RAG — ChromaDB + perfume catalog | ⬜ Pending |
 | 7 | LangGraph state machine + Claude | ⬜ Pending |
