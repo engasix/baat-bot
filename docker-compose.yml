@@ -1,0 +1,19 @@
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: baat_bot
+    ports:
+      - "5060:5060/udp"             # SIP
+      - "5060:5060/tcp"             # SIP TCP
+      - "8088:8088/tcp"             # ARI HTTP — Python app connects here
+      - "10000-10010:10000-10010/udp"  # RTP media range
+    volumes:
+      - ./config/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./config/http.conf:/etc/asterisk/http.conf:ro
+      - ./config/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./config/extensions.conf:/etc/asterisk/extensions.conf:ro
+    # host.docker.internal resolves to the host machine (your Mac).
+    # Asterisk needs this to send ExternalMedia RTP to the Python app on host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
