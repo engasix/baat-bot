@@ -12,8 +12,6 @@ services:
       - ./config/http.conf:/etc/asterisk/http.conf:ro
       - ./config/pjsip.conf:/etc/asterisk/pjsip.conf:ro
       - ./config/extensions.conf:/etc/asterisk/extensions.conf:ro
-    # host.docker.internal resolves to the host machine (your Mac).
-    # Asterisk needs this to send ExternalMedia RTP to the Python app on host.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

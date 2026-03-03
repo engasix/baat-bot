@@ -15,8 +15,9 @@ product questions via RAG, takes order, confirms delivery address.
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        ASTERISK SERVER                              │
+│                   (Docker: andrius/asterisk:latest)                 │
 │                                                                     │
-│  sip.conf ──► SIP registration & call routing                       │
+│  pjsip.conf ──► SIP registration & call routing (PJSIP, no chan_sip)│
 │  extensions.conf ──► Stasis(baat_bot) ──► hands call to ARI        │
 │  ari.conf ──► ARI enabled on port 8088                              │
 │                                                                     │
@@ -75,110 +76,160 @@ Phase 10 ──►  Live deployment (Pakistani phone number)
 
 ---
 
-## Phase 1 — Install & Configure Asterisk
+## Phase 1 — Install & Configure Asterisk ✅ DONE
 
-**Goal:** Asterisk is running locally. A SIP client (Linphone) can call extension 1000
-and Asterisk routes it to our ARI application. ARI is reachable via HTTP.
+**Goal:** Asterisk is running in Docker. Two SIP clients (1001 Mac, 1002 mobile)
+can register and call each other. Extension 1000 routes to Stasis(baat_bot).
+ARI is reachable via HTTP on port 8088.
 
-### Steps
+> **Note:** Asterisk 20+ (used by andrius/asterisk:latest) dropped chan_sip entirely.
+> `sip.conf` does not exist. Use `pjsip.conf` with separate endpoint/auth/aor sections.
+> `http.conf` is required to enable the ARI HTTP server.
 
-#### 1.1 Install Asterisk
+### Files created
 
-```bash
-brew install asterisk
+```
+docker-compose.yml
+config/
+├── ari.conf          — ARI user: baat_bot / baat-1001
+├── http.conf         — HTTP server on port 8088
+├── pjsip.conf        — PJSIP endpoints 1001 + 1002
+└── extensions.conf   — internal dial plan + extension 1000 → Stasis
 ```
 
-#### 1.2 Write `config/ari.conf`
+#### `docker-compose.yml`
 
-```ini
-[general]
-enabled = yes
-pretty = yes
-
-[baat_bot]
-type = user
-read_only = no
-password = ari_password123
+```yaml
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: baat_bot
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "8088:8088/tcp"
+      - "10000-10010:10000-10010/udp"
+    volumes:
+      - ./config/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./config/http.conf:/etc/asterisk/http.conf:ro
+      - ./config/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./config/extensions.conf:/etc/asterisk/extensions.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 ```
 
-#### 1.3 Write `config/sip.conf`
+#### `config/pjsip.conf` (key structure — PJSIP requires 3 sections per peer)
 
 ```ini
-[general]
-context = default
-allowguest = no
-bindport = 5060
-bindaddr = 0.0.0.0
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0
 
-[mobile_client]
-type = friend
-secret = yourpassword123
-host = dynamic
-context = incoming
-dtmfmode = rfc2833
-allow = ulaw
-allow = alaw
+[1001]
+type=endpoint
+context=default
+disallow=all
+allow=ulaw
+transport=transport-udp
+auth=1001
+aors=1001
+direct_media=no
+force_rport=yes
+rewrite_contact=yes
+rtp_symmetric=yes
+
+[1001]
+type=auth
+auth_type=userpass
+username=1001
+password=1001
+
+[1001]
+type=aor
+max_contacts=1
+qualify_frequency=30
+
+; same pattern repeated for [1002]
 ```
 
-#### 1.4 Write `config/extensions.conf`
+#### `config/extensions.conf`
 
 ```ini
-[incoming]
+[default]
+exten => 1001,1,Dial(PJSIP/1001)
+exten => 1001,n,Hangup()
+
+exten => 1002,1,Dial(PJSIP/1002)
+exten => 1002,n,Hangup()
+
 exten => 1000,1,Answer()
 exten => 1000,n,Stasis(baat_bot)
 exten => 1000,n,Hangup()
 ```
 
-#### 1.5 Copy configs to Asterisk
+### Start Asterisk
 
 ```bash
-sudo cp config/ari.conf        /usr/local/etc/asterisk/ari.conf
-sudo cp config/sip.conf        /usr/local/etc/asterisk/sip.conf
-sudo cp config/extensions.conf /usr/local/etc/asterisk/extensions.conf
+docker compose up -d
 ```
 
-#### 1.6 Start Asterisk
+> **Config reload tip:** Volume-mounted files can lag on Mac Docker Desktop.
+> After any config change use `docker cp` to force update:
+> ```bash
+> docker cp ./config/extensions.conf baat_bot:/etc/asterisk/extensions.conf
+> docker exec -it baat_bot asterisk -rx "core reload"
+> ```
 
-```bash
-sudo asterisk -cvvv
+### SIP client settings (Linphone / Zoiper)
+
 ```
-
-#### 1.7 Set up Linphone on mobile
-
-```
-SIP Server:  <Mac WiFi IP>   (ipconfig getifaddr en0)
-Username:    mobile_client
-Password:    yourpassword123
-Port:        5060
+Username:  1001  (Mac desktop)  or  1002  (mobile)
+Password:  1001                 or  1002
+Domain:    <Mac WiFi IP>  (ipconfig getifaddr en0)
+Port:      5060
 ```
 
 ### Verification
 
 ```
-[ ] sudo asterisk -cvvv  — starts without errors
-[ ] Asterisk console: sip show peers  — shows mobile_client
-[ ] Linphone shows "Registered"
-[ ] curl -u baat_bot:ari_password123 http://localhost:8088/ari/asterisk/info  — returns JSON
-[ ] Dial 1000 from Linphone  — call connects (silence is fine, no app yet)
+[✓] docker compose up  — container baat_bot starts without errors
+[✓] SIP client 1001 (Mac) shows Registered
+[✓] SIP client 1002 (mobile) shows Registered
+[✓] 1002 calls 1001 — rings and connects
+[✓] 1001 calls 1002 — rings and connects
+[✓] curl -u baat_bot:baat-1001 http://localhost:8088/ari/asterisk/info  — returns JSON
+[✓] Dial 1000 from either client — connects (silence OK, no ARI app yet)
+[ ] Hangup notification: 1002→1001, 1002 hangs — works ✓
+[~] Hangup notification: other 3 scenarios — partial (Docker NAT limitation, acceptable for dev)
 ```
+
+### Known limitation
+
+Docker Desktop for Mac NAT translates all external SIP packets to `192.168.65.1`
+inside the container. This means Asterisk cannot send BYE back to the correct
+client IP for the callee side. Only the case where the mobile (caller) hangs up
+works reliably. This does not affect the AI bot flow (ARI/ExternalMedia uses
+a different signaling path) and will be resolved in Phase 10 (VPS deployment).
 
 ---
 
-## Phase 2 — Python Project Setup (uv)
+## Phase 2 — Python Project Setup (uv) 🔄 IN PROGRESS
 
 **Goal:** Python project initialized with uv, all dependencies installed,
 environment variables configured, and folder structure in place.
 
 ### Steps
 
-#### 2.1 Initialize project
+#### 2.1 Initialize project ✅ Done
 
 ```bash
 cd baat_bot
 uv init .
 ```
 
-#### 2.2 Add dependencies
+#### 2.2 Add dependencies ⬜ Pending
 
 ```bash
 uv add anthropic
@@ -193,7 +244,7 @@ uv add chromadb
 uv add sentence-transformers
 ```
 
-#### 2.3 Create folder structure
+#### 2.3 Create folder structure ⬜ Pending
 
 ```bash
 mkdir -p agent services rag data config
@@ -203,7 +254,7 @@ touch rag/__init__.py rag/catalog.py rag/embedder.py rag/retriever.py
 touch main.py .env
 ```
 
-#### 2.4 Write `.env`
+#### 2.4 Write `.env` ✅ Done (created, keys need filling)
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
@@ -211,23 +262,25 @@ DEEPGRAM_API_KEY=...
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 ARI_URL=http://localhost:8088
 ARI_USER=baat_bot
-ARI_PASSWORD=ari_password123
-RTP_HOST=127.0.0.1
+ARI_PASSWORD=baat-1001
+RTP_HOST=host.docker.internal   # Asterisk (Docker) sends RTP to Mac host
 RTP_PORT=7000
 ```
 
-#### 2.5 Final folder structure
+#### 2.5 Final folder structure ⬜ Pending
 
 ```
 baat_bot/
 ├── plan.md
 ├── phases.md
-├── pyproject.toml          ← created by uv
-├── .env
-├── service-account.json    ← Google Cloud credentials
-├── config/
+├── pyproject.toml          ← created by uv ✅
+├── docker-compose.yml      ✅
+├── .env                    ✅ (API keys still need filling)
+├── service-account.json    ← Google Cloud credentials (not yet)
+├── config/                 ✅
 │   ├── ari.conf
-│   ├── sip.conf
+│   ├── http.conf
+│   ├── pjsip.conf
 │   └── extensions.conf
 ├── data/
 │   └── perfumes.json       ← men + women perfume catalog
@@ -252,12 +305,14 @@ baat_bot/
 ### Verification
 
 ```
+[✓] uv init done — pyproject.toml exists
 [ ] uv run python -c "import anthropic; print('ok')"
 [ ] uv run python -c "import deepgram; print('ok')"
 [ ] uv run python -c "import langgraph; print('ok')"
 [ ] uv run python -c "import chromadb; print('ok')"
 [ ] uv run python -c "import sentence_transformers; print('ok')"
 [ ] .env has all 7 keys filled in
+[ ] Folder structure created (agent/, services/, rag/, data/)
 ```
 
 ---
@@ -727,10 +782,25 @@ agent/          — zero changes
 
 ## Summary
 
-| Phase | Builds | Skill Demonstrated |
+| Phase | Builds | Status |
 |---|---|---|
-| 1 | Asterisk + ARI/SIP config | Telephony, VoIP |
-| 2 | uv project + folder structure | Python project setup |
+| 1 | Asterisk Docker + PJSIP + ARI config | ✅ Done |
+| 2 | uv project + folder structure + deps | 🔄 In Progress |
+| 3 | ARI WebSocket — call control | ⬜ Pending |
+| 4 | RTP UDP bridge — raw audio | ⬜ Pending |
+| 5 | Deepgram streaming STT + VAD | ⬜ Pending |
+| 6 | RAG — ChromaDB + perfume catalog | ⬜ Pending |
+| 7 | LangGraph state machine + Claude | ⬜ Pending |
+| 8 | Google TTS sentence-chunked + end-to-end | ⬜ Pending |
+| 9 | Barge-in with asyncio concurrency | ⬜ Pending |
+| 10 | Live Pakistani number deployment | ⬜ Pending |
+
+_Old summary (skill reference):_
+
+| Phase | Skill Demonstrated |
+|---|---|
+| 1 | Telephony, VoIP, Docker |
+| 2 | Python project setup |
 | 3 | ARI WebSocket — call control | Async Python, REST + WebSocket |
 | 4 | RTP UDP bridge — raw audio | Network programming, audio protocols |
 | 5 | Deepgram streaming STT + VAD | Real-time audio, streaming APIs |
