@@ -372,7 +372,7 @@ This establishes both audio directions (in + out) before adding STT/agent logic.
 
 ```
 "Assalam o Alikum, Pure Scents call karny ka buhat shukriya,
- me Aysha baat kar rahi hon, me aap ki kia madad kar salti hon"
+ me Aysha baat kar rahi hon, me aap ki kia madad kar sakti hon?"
 ```
 
 > **Note:** Google TTS `ur-PK-Standard-A` voice works best with Urdu script (نستعلیق).
@@ -435,7 +435,7 @@ POST /ari/bridges/{id}/addChannel   (caller channel + externalMedia channel)
 [ ] Dial 1000 — call connects
 [ ] Caller hears "Assalam o Alikum..." welcome message within ~2s of answering
 [ ] Console prints inbound RTP packet count incrementing (~50 packets/sec)
-[ ] Payload size = 320 bytes  (20ms × 16000Hz × 2 bytes = 640 bytes / 2 = 320)
+[ ] Payload size = 640 bytes  (20ms × 16000 Hz × 2 bytes/sample = 640)
 [ ] No "bridge dropped" errors in Asterisk console
 [ ] Hang up from caller — UDP stream stops cleanly
 ```
