@@ -267,7 +267,7 @@ RTP_HOST=host.docker.internal   # Asterisk (Docker) sends RTP to Mac host
 RTP_PORT=7000
 ```
 
-#### 2.5 Final folder structure ⬜ Pending
+#### 2.5 Final folder structure ✅ Pending
 
 ```
 baat_bot/
@@ -361,46 +361,63 @@ WS     /ari/events                   event stream
 
 ---
 
-## Phase 4 — RTP Audio Bridge + Welcome Message
+## Phase 4 — RTP Audio Bridge + Welcome Message ✅ DONE
 
 **Goal:** Python opens a UDP socket on port 7000. Asterisk streams caller's
 raw audio to it via ExternalMedia. Immediately on call answer, the bot plays
 a hardcoded TTS welcome message. We also verify inbound RTP is flowing.
 This establishes both audio directions (in + out) before adding STT/agent logic.
 
-### Welcome message
+### Welcome message (Urdu script)
 
 ```
-"Assalam o Alikum, Pure Scents call karny ka buhat shukriya,
- me Aysha baat kar rahi hon, me aap ki kia madad kar sakti hon?"
+"السلام علیکم! Pure Scents کال کرنے کا شکریہ!
+ میں عائشہ بات کر رہی ہوں۔ میں آپ کی کیا مدد کر سکتی ہوں؟"
 ```
 
-> **Note:** Google TTS `ur-PK-Standard-A` voice works best with Urdu script (نستعلیق).
-> For Phase 4 we use this Roman Urdu string directly to get audio flowing fast.
-> Phase 8 will refine pronunciation using proper Urdu script for agent responses.
+> **Note:** Urdu script (نستعلیق) is required for correct TTS pronunciation.
+> Roman Urdu text causes TTS models to treat it as English and produce broken audio.
 
 ### What `services/rtp.py` contains
 
 ```python
-# decode_rtp(packet: bytes) -> bytes
-#   strips 12-byte RTP header, returns raw PCM payload
+# PAYLOAD_TYPE = 10  (slin/8kHz — verified from live Asterisk packet capture)
+# FRAME_SAMPLES = 160  (8kHz × 20ms)
+# FRAME_BYTES   = 320  (160 samples × 2 bytes)
 
-# encode_rtp(payload, seq, timestamp, ssrc) -> bytes
-#   wraps PCM payload in RTP header (PT=11 for slin16)
+# _byteswap16(data) → bytes
+#   RTP wire format is big-endian; TTS/STT use little-endian. Swap on both send/receive.
+
+# decode_rtp(packet) → bytes
+#   strips 12-byte header, byteswaps payload → LE PCM for STT
+
+# encode_rtp(payload, seq, timestamp, ssrc) → bytes
+#   wraps LE PCM (after byteswap) in RTP header (PT=10/slin)
 
 # UdpAudioStream
 #   asyncio UDP server on RTP_PORT
-#   async receive() -> bytes     one RTP packet at a time
-#   async send(payload: bytes)   send audio back to Asterisk
+#   receive() → bytes           one decoded PCM frame
+#   send(payload: bytes)        encode + send one 20ms frame to Asterisk
+#   Remote addr learned from first inbound packet (Asterisk's RTP source port)
 ```
 
-### What `services/tts.py` contains (basic, Phase 4 subset)
+### What `services/tts/` contains
+
+TTS is structured as a modular package — swap providers by changing one import line.
+
+```
+services/tts/
+  __init__.py     ← interface: exposes synthesize() + WELCOME_MESSAGE
+                     change one line here to switch provider
+  google.py       ← Google Chirp3-HD (ur-IN-Chirp3-HD-Aoede, 8kHz LINEAR16)
+  elevenlabs.py   ← ElevenLabs eleven_multilingual_v2 (pcm_8000)
+```
 
 ```python
 # synthesize(text: str) -> bytes
-#   calls Google Cloud TTS (ur-PK-Standard-A, LINEAR16, 16000Hz)
-#   returns raw slin16 PCM bytes (no RTP header)
-#   used to generate welcome message audio at startup
+#   returns raw 8 kHz 16-bit mono PCM (no RTP header, no WAV header)
+#   Google: WAV header stripped (first 44 bytes)
+#   ElevenLabs: pcm_8000 format returns raw PCM directly
 ```
 
 > Full sentence-chunked streaming TTS is added in Phase 8.
@@ -410,34 +427,67 @@ This establishes both audio directions (in + out) before adding STT/agent logic.
 
 ```
 Dial 1000
-  → ARI answers call
-  → Create ExternalMedia channel + bridge
-  → synthesize(WELCOME_MESSAGE) → PCM bytes
-  → chunk into 320-byte frames → encode_rtp() → UdpAudioStream.send()
+  → ARI WebSocket: StasisStart received
+  → answer_channel()
+  → setup_media_bridge():
+      POST /ari/channels/externalMedia  (format=slin, external_host=host.docker.internal:7000)
+      POST /ari/bridges  (type=mixing)
+      POST /ari/bridges/{id}/addChannel  (caller — separate call, not comma-separated)
+      POST /ari/bridges/{id}/addChannel  (externalMedia — separate call)
+  → asyncio.gather(synthesize(WELCOME_MESSAGE), wait_for_first_rtp_packet)
+  → first inbound packet → learn Asterisk's RTP source address
+  → PCM → 320-byte frames → byteswap → encode_rtp → UdpAudioStream.send()
   → caller hears welcome message
-  → inbound RTP packets logged to console (packet count + payload size)
-  → call stays open until caller hangs up
+  → inbound RTP packets counted until caller hangs up
+  → StasisEnd → cleanup_call() → bridge + ExternalMedia deleted
 ```
+
+### Key fixes discovered during implementation
+
+- **RTP port range**: Added `config/rtp.conf` (`rtpstart=10000`, `rtpend=10099`) to keep
+  Asterisk RTP within the docker-compose port mapping. Without this Asterisk uses
+  16384–32767 which is outside Docker's mapped range.
+- **Byte order**: RTP wire format is big-endian; TTS output and STT input are little-endian.
+  `_byteswap16()` is required on both send and receive paths.
+- **Payload type**: Asterisk ExternalMedia uses PT=10 for slin/8kHz (not PT=11).
+  Verified from live packet capture.
+- **ExternalMedia StasisStart**: ExternalMedia channels fire their own StasisStart.
+  Must track channel IDs in `_ext_channels` set and skip them in the handler.
+- **addChannel format**: Asterisk 22 rejects comma-separated IDs. Use two separate
+  POST calls — one per channel.
+- **Zombie channels**: Without cleanup on StasisEnd, ExternalMedia channels accumulate
+  across calls. Added `_active_calls` dict + `cleanup_call()` on StasisEnd.
+- **Absolute timing**: `asyncio.sleep(20ms)` drifts across 500+ frames causing audio
+  breaks. Fixed with `next_send = start_time + n * frame_dur` per frame.
+- **Docker restart**: Stale Asterisk state after config changes requires
+  `docker compose down && docker compose up -d` (not just reload).
 
 ### ARI calls added in this phase
 
 ```
 POST /ari/channels/externalMedia
-     body: { app: "baat_bot", external_host: "host.docker.internal:7000", format: "slin16" }
+     body: { app: "baat_bot", external_host: "host.docker.internal:7000", format: "slin" }
 
 POST /ari/bridges
-POST /ari/bridges/{id}/addChannel   (caller channel + externalMedia channel)
+     body: { type: "mixing" }
+
+POST /ari/bridges/{id}/addChannel   × 2  (one per channel — not comma-separated)
+
+DELETE /ari/bridges/{id}            (on StasisEnd)
+DELETE /ari/channels/{ext_id}       (on StasisEnd)
 ```
 
 ### Verification
 
 ```
-[ ] Dial 1000 — call connects
-[ ] Caller hears "Assalam o Alikum..." welcome message within ~2s of answering
-[ ] Console prints inbound RTP packet count incrementing (~50 packets/sec)
-[ ] Payload size = 640 bytes  (20ms × 16000 Hz × 2 bytes/sample = 640)
-[ ] No "bridge dropped" errors in Asterisk console
-[ ] Hang up from caller — UDP stream stops cleanly
+[✓] Dial 1000 — call connects
+[✓] Console: ExternalMedia channel created, bridge created, both channels added (204)
+[✓] Console: [RTP] Asterisk RTP source: ('192.168.65.x', PORT)  PT=10 seq=N payload=320b
+[✓] Caller hears Urdu welcome message within ~1.5s of answering
+[✓] Console: [RTP] Sent N frames — no breaks or audio glitches
+[✓] Console: [RTP] N packets received  payload=320 bytes  (incrementing every ~1s)
+[✓] Hang up from caller — stream stops, bridge + ExternalMedia deleted cleanly
+[✓] Second call immediately after first works correctly (no zombie channels)
 ```
 
 ---
@@ -829,7 +879,7 @@ agent/          — zero changes
 | 1 | Asterisk Docker + PJSIP + ARI config | ✅ Done |
 | 2 | uv project + folder structure + deps | ✅ Done |
 | 3 | ARI WebSocket — call control | ✅ Done |
-| 4 | RTP UDP bridge + TTS welcome message | ⬜ Pending |
+| 4 | RTP UDP bridge + TTS welcome message | ✅ Done |
 | 5 | Deepgram streaming STT + VAD | ⬜ Pending |
 | 6 | RAG — ChromaDB + perfume catalog | ⬜ Pending |
 | 7 | LangGraph state machine + Claude | ⬜ Pending |
