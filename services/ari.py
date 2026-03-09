@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from services import rtp as rtp_svc
 from services import tts
+from services import stt as stt_svc
 
 load_dotenv()
 
@@ -177,18 +178,22 @@ async def handle_stasis_start(session: aiohttp.ClientSession, event: dict) -> No
     await play_audio(pcm)
     print("[TTS] Welcome message done")
 
-    # Phase 4 verification: count inbound RTP packets until caller hangs up
-    count = 0
-    print("[RTP] Monitoring inbound audio (hang up to stop) ...")
+    # Phase 5: stream inbound audio through STT
+    stt = stt_svc.DeepgramSTT()
+    print("[STT] Listening — speak Urdu into the phone ...")
     while True:
         try:
             frame = await asyncio.wait_for(audio_stream.receive(), timeout=5.0)
-            count += 1
-            if count % 50 == 0:   # log every ~1 second (50 × 20ms)
-                print(f"[RTP] {count} packets received  payload={len(frame)} bytes")
+            transcript = await stt.process(frame)
+            if transcript:
+                print(f"[STT] ▶ {transcript}")
+                pcm = await asyncio.to_thread(tts.synthesize, transcript)
+                await play_audio(pcm)
         except asyncio.TimeoutError:
-            print(f"[RTP] Stream ended — {count} total packets received")
+            print("[STT] No audio — call ended")
             break
+
+    stt.close()
 
 
 # ── WebSocket loop ────────────────────────────────────────────────────────────

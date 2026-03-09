@@ -18,12 +18,9 @@ def _get_client() -> texttospeech.TextToSpeechClient:
 def synthesize(text: str) -> bytes:
     """
     Synthesize text → raw 8 kHz 16-bit mono PCM using Google Chirp3-HD.
-
     Returns raw LINEAR16 bytes (WAV header stripped) ready for RTP transmission.
     """
-    client = _get_client()
-
-    response = client.synthesize_speech(
+    response = _get_client().synthesize_speech(
         input=texttospeech.SynthesisInput(text=text),
         voice=texttospeech.VoiceSelectionParams(
             language_code="ur-IN",
@@ -35,6 +32,5 @@ def synthesize(text: str) -> bytes:
             speaking_rate=1.4,
         ),
     )
-
     # Strip the 44-byte WAV header — return raw PCM
     return response.audio_content[44:]

@@ -66,7 +66,7 @@ Phase 1  ──►  Install & configure Asterisk
 Phase 2  ──►  Python project setup (uv)
 Phase 3  ──►  Connect Python to Asterisk via ARI
 Phase 4  ──►  RTP audio bridge + TTS welcome message (first audio out)
-Phase 5  ──►  STT — Deepgram streaming (speech → text)
+Phase 5  ──►  STT — Deepgram Nova-3 streaming (speech → text) ✅ DONE
 Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval
 Phase 7  ──►  LangGraph agent (text → Urdu response)
 Phase 8  ──►  TTS — Google Cloud (text → audio back to caller)
@@ -492,35 +492,64 @@ DELETE /ari/channels/{ext_id}       (on StasisEnd)
 
 ---
 
-## Phase 5 — STT: Deepgram Streaming (Speech → Text)
+## Phase 5 — STT: Deepgram Streaming (Speech → Text) ✅ DONE
 
-**Goal:** Caller's audio from the UDP stream is fed into Deepgram's WebSocket
-API in real-time. webrtcvad detects end-of-speech (500ms silence). Final
-transcript is printed to console in Urdu.
+**Goal:** Caller's audio from the UDP stream is fed into Deepgram Nova-3's
+WebSocket API in real-time. Deepgram handles endpointing internally (500ms
+silence → final result). Final transcript is echoed back via TTS to confirm
+the pipeline is working end-to-end.
 
-### What `services/stt.py` contains
+### What was built
 
+**`services/stt/` — modular STT package** (same pattern as `services/tts/`):
+- `__init__.py` — interface file; swap one import line to change provider
+- `deepgram.py` — **active provider**: Deepgram Nova-3 (deepgram-python-sdk v6)
+- `google.py` — fallback: Google STT with 8kHz→16kHz internal upsampling + webrtcvad
+- `openai.py` — fallback: OpenAI Whisper (batch mode, VAD + energy gate)
+
+**Deepgram Nova-3 design (`services/stt/deepgram.py`):**
 ```python
-# DeepgramSTT
-#   WebSocket: wss://api.deepgram.com/v1/listen
-#   params: language=ur, model=nova-2, encoding=linear16, sample_rate=16000
-#   async send_audio(frame: bytes)         feed 20ms PCM frames
-#   async transcripts() -> AsyncGenerator  yields final transcript strings
+# One persistent WebSocket per call (opened lazily on first frame)
+# Background thread owns the connection; asyncio queue bridges to the event loop
+# All RTP 8kHz frames streamed directly — no client-side VAD needed
+# Deepgram endpointing=500 (500ms silence) → final transcript
+# deepgram-python-sdk v6: ALL query params must be strings
+#   model="nova-3", language="ur", encoding="linear16"
+#   sample_rate="8000", smart_format="true"
+#   endpointing="500", interim_results="false"
+```
 
-# VoiceActivityDetector  (wraps webrtcvad)
-#   async process(frame: bytes) -> str | None
-#   returns transcript string when 500ms silence detected, else None
+**`services/ari.py` Phase 5 loop:**
+```python
+stt = stt_svc.DeepgramSTT()
+while True:
+    frame = await asyncio.wait_for(audio_stream.receive(), timeout=5.0)
+    transcript = await stt.process(frame)
+    if transcript:
+        pcm, _ = tts.synthesize(transcript)   # echo back via TTS
+        await play_audio(pcm)
+stt.close()
 ```
 
 ### Verification
 
 ```
-[ ] Dial 1000 — call connects
-[ ] Speak Urdu into Linphone
-[ ] Console prints Urdu transcript within ~1s of stopping speech
-[ ] Silence does not produce empty transcripts
-[ ] Multiple turns in a row work correctly
+[✓] Dial 1000 — welcome message plays in Urdu
+[✓] "[STT] Deepgram Nova-3 connected" appears in console
+[✓] Speak Urdu → console prints "[STT] ▶ <transcript>" within ~1s of stopping
+[✓] Transcript is echoed back via Google TTS (confirms full duplex pipeline)
+[✓] Silence / background noise does not produce false transcripts
+[✓] Multiple turns in a row work (persistent WebSocket handles all turns)
+[✓] Call hangup → "[STT] No audio — call ended" printed, stt.close() called
 ```
+
+### Key implementation notes
+- deepgram-python-sdk v6 is a Fern-generated SDK — completely different from v2/v3 docs
+- Use `client.listen.v1.connect()` context manager (NOT `LiveOptions`)
+- Use `EventType.MESSAGE` from `deepgram.core.events`
+- Use `ListenV1Results` from `deepgram.listen.v1.types.listen_v1results`
+- HTTP 400 on connect = a param was passed as int/bool instead of string
+- RTP stays at 8kHz throughout (slin, FRAME_BYTES=320) — no pipeline change needed
 
 ---
 

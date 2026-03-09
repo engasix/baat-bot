@@ -19,9 +19,7 @@ def _get_client() -> ElevenLabs:
 def synthesize(text: str) -> bytes:
     """
     Synthesize text → raw 8 kHz 16-bit mono PCM using ElevenLabs.
-
-    pcm_8000 output format returns raw PCM directly — no resampling or
-    header stripping needed.
+    pcm_8000 returns raw PCM directly — no header stripping needed.
     """
     audio_chunks = _get_client().text_to_speech.convert(
         voice_id=VOICE_ID,
