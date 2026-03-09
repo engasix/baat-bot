@@ -31,6 +31,9 @@ audio_stream = rtp_svc.UdpAudioStream()
 # ExternalMedia channel IDs we created — must not handle their StasisStart events
 _ext_channels: set[str] = set()
 
+# Maps caller channel_id → {"bridge_id": ..., "ext_id": ...} for cleanup on hangup
+_active_calls: dict[str, dict] = {}
+
 
 # ── ARI helpers ───────────────────────────────────────────────────────────────
 
@@ -44,6 +47,18 @@ async def verify_connection(session: aiohttp.ClientSession) -> None:
 async def answer_channel(session: aiohttp.ClientSession, channel_id: str) -> None:
     async with session.post(f"{ARI_URL}/ari/channels/{channel_id}/answer") as resp:
         print(f"[ARI] Answered  channel={channel_id} ({resp.status})")
+
+
+async def cleanup_call(session: aiohttp.ClientSession, channel_id: str) -> None:
+    """Delete the bridge and ExternalMedia channel when a call ends."""
+    call = _active_calls.pop(channel_id, None)
+    if not call:
+        return
+    async with session.delete(f"{ARI_URL}/ari/bridges/{call['bridge_id']}") as resp:
+        print(f"[ARI] Bridge deleted ({resp.status})")
+    async with session.delete(f"{ARI_URL}/ari/channels/{call['ext_id']}") as resp:
+        print(f"[ARI] ExternalMedia deleted ({resp.status})")
+    _ext_channels.discard(call["ext_id"])
 
 
 async def hangup_channel(session: aiohttp.ClientSession, channel_id: str) -> None:
@@ -98,7 +113,7 @@ async def setup_media_bridge(
     ) as resp:
         print(f"[ARI] ExternalMedia added to bridge ({resp.status})")
 
-    return bridge_id
+    return bridge_id, ext_id
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
@@ -137,7 +152,8 @@ async def handle_stasis_start(session: aiohttp.ClientSession, event: dict) -> No
     print(f"[EVT] StasisStart  channel={channel_id}  caller={caller_num}")
 
     await answer_channel(session, channel_id)
-    await setup_media_bridge(session, channel_id)
+    bridge_id, ext_id = await setup_media_bridge(session, channel_id)
+    _active_calls[channel_id] = {"bridge_id": bridge_id, "ext_id": ext_id}
 
     # Synthesize welcome message and wait for first RTP packet concurrently.
     # By the time TTS is done (~0.5-1s), Asterisk has started sending RTP
@@ -197,6 +213,7 @@ async def run_websocket(session: aiohttp.ClientSession) -> None:
                 elif event_type == "StasisEnd":
                     channel_id = event["channel"]["id"]
                     print(f"[EVT] StasisEnd    channel={channel_id}")
+                    asyncio.create_task(cleanup_call(session, channel_id))
 
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 raise ConnectionError(f"WebSocket error: {ws.exception()}")

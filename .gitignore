@@ -12,3 +12,4 @@ wheels/
 # Environment variables (contains API keys — never commit)
 .env
 service-account.json
+.DS_Store

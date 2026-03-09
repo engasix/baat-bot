@@ -57,6 +57,7 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self._transport = transport
 
     def datagram_received(self, data: bytes, addr: tuple) -> None:
+        print(f"[UDP] Packet from {addr}  len={len(data)}")
         self._queue.put_nowait((data, addr))
 
     def error_received(self, exc: Exception) -> None:
