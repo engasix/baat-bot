@@ -67,7 +67,7 @@ Phase 2  ──►  Python project setup (uv)
 Phase 3  ──►  Connect Python to Asterisk via ARI
 Phase 4  ──►  RTP audio bridge + TTS welcome message (first audio out)
 Phase 5  ──►  STT — Deepgram Nova-3 streaming (speech → text) ✅ DONE
-Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval
+Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval ✅ DONE
 Phase 7  ──►  LangGraph agent (text → Urdu response)
 Phase 8  ──►  TTS — Google Cloud (text → audio back to caller)
 Phase 9  ──►  Barge-in (caller interrupts bot)
@@ -553,93 +553,61 @@ stt.close()
 
 ---
 
-## Phase 6 — RAG: Perfume Catalog + ChromaDB + Retrieval
+## Phase 6 — RAG: Perfume Catalog + ChromaDB + Retrieval ✅ DONE
 
-**Goal:** Build the RAG pipeline. Perfume catalog is loaded from JSON, embedded
-with multilingual-e5-small, stored in ChromaDB. A retrieval function accepts
-an Urdu user query and returns the top 3 matching perfumes. Tested independently
-before wiring into the LangGraph agent.
+**Goal:** Build the RAG pipeline. Perfume catalog loaded from JSON, embedded
+with multilingual-e5-small, stored in ChromaDB. Retrieval handles semantic
+Urdu queries + price-sorted lookups. Tested via `test_rag.py`.
 
-### What `data/perfumes.json` contains
+### Catalog: `data/perfumes.json`
+20 real perfumes covering the full Pakistani market:
+- **Price range**: Rs 4,500 (Joop! Homme) → Rs 52,000 (Creed Aventus)
+- **Price tiers**: Budget (≤8k), Mid-range (≤22k), Premium (>22k)
+- **Gender**: 10 men, 8 women, 2 unisex
+- **Brands**: Chanel, Dior, Armani, Tom Ford, Creed, Versace, Lancôme, YSL, Davidoff, Calvin Klein, etc.
+- **Fields**: id, name, brand, gender, category, price_pkr, size_ml, scent_notes, description_ur, description_en, in_stock
 
-```json
-[
-  {
-    "id": "p001",
-    "name": "Blue de Chanel",
-    "brand": "Chanel",
-    "gender": "men",
-    "price_pkr": 18500,
-    "size_ml": 100,
-    "scent_notes": ["citrus", "cedar", "sandalwood"],
-    "description": "تازہ اور لکڑی والی خوشبو، آفس اور شام کے لیے بہترین۔",
-    "in_stock": true
-  },
-  {
-    "id": "p002",
-    "name": "La Vie Est Belle",
-    "brand": "Lancome",
-    "gender": "women",
-    "price_pkr": 15000,
-    "size_ml": 75,
-    "scent_notes": ["iris", "vanilla", "patchouli"],
-    "description": "میٹھی اور پھولوں والی خوشبو، خاص مواقع کے لیے۔",
-    "in_stock": true
-  }
-]
+### Architecture
+
+```
+data/perfumes.json
+    ↓  rag/catalog.py — load() + to_document() (bilingual Urdu+English text)
+    ↓  rag/embedder.py — intfloat/multilingual-e5-small (local, ~120MB, 100+ langs)
+    ↓  ChromaDB (./chroma_db)  —  cosine similarity, persisted to disk
+    ↓  rag/retriever.py — build_index() / search() / cheapest() / most_premium()
 ```
 
-### What `rag/catalog.py` contains
+### Key design: bilingual document text
+Each perfume is stored as a rich bilingual string so Urdu queries from STT
+match correctly via semantic similarity:
+```
+"Bleu de Chanel Chanel مردوں کے لیے مردانہ تازہ اور لکڑی والی مردانہ خوشبو ...
+ خوشبو scent notes: citrus cedar sandalwood ... قیمت price 32000 روپے مہنگا پریمیم لگژری"
+```
 
+### API
 ```python
-# load_catalog() -> list[dict]
-#   reads data/perfumes.json
-#   creates one searchable text string per perfume:
-#   "Blue de Chanel Chanel men مردوں citrus cedar sandalwood تازہ لکڑی آفس"
-#   (bilingual text improves Urdu query matching)
+from rag import build_index, search, cheapest, most_premium
+
+build_index()                              # startup — idempotent, skips if already indexed
+search("مردوں کے لیے بہترین خوشبو")       # semantic search, returns list[dict]
+search("floral women", gender="women")    # with gender filter
+cheapest(n=3)                             # sorted by price_pkr ascending
+most_premium(n=3)                         # sorted by price_pkr descending
 ```
 
-### What `rag/embedder.py` contains
-
-```python
-# Uses: intfloat/multilingual-e5-small  (free, local, ~120MB, supports Urdu)
-# embed(texts: list[str]) -> list[list[float]]
-# Called at startup (catalog) and per query (user questions)
-```
-
-### What `rag/retriever.py` contains
-
-```python
-# ChromaDB persistent collection: "perfumes"
-#
-# build_index()
-#   called once at app startup
-#   loads catalog → embeds → upserts into ChromaDB
-#
-# search(query: str, gender: str = None, top_k: int = 3) -> list[dict]
-#   embeds the Urdu query
-#   optional gender filter: "men" | "women"
-#   returns top_k matching perfume dicts
-```
-
-### Verification
-
-```python
-# uv run python -c "
-# from rag.retriever import build_index, search
-# build_index()
-# results = search('مردوں کے لیے تازہ خوشبو')
-# for r in results: print(r['name'], r['price_pkr'])
-# "
-```
+### Verification (`uv run python test_rag.py`)
 
 ```
-[ ] build_index() runs without errors
-[ ] ChromaDB collection created with N perfume documents
-[ ] search('مردوں کے لیے خوشبو')  → returns men's perfumes
-[ ] search('خواتین کے لیے')        → returns women's perfumes
-[ ] search('سستی خوشبو')           → returns lowest-price items
-[ ] gender filter works correctly
+[✓] build_index() — 20 perfumes indexed in ChromaDB (cosine space)
+[✓] cheapest(3)        → Joop Rs 4,500 / Cool Water Rs 5,500 / CK One Rs 6,500
+[✓] most_premium(3)    → Aventus Rs 52,000 / Oud Wood Rs 48,000 / Bleu de Chanel Rs 32,000
+[✓] "مردوں کے لیے بہترین خوشبو"  → men's perfumes (1 Million, Sauvage, Eros)
+[✓] "عورتوں کے لیے بہترین خوشبو" → women's perfumes (La Vie Est Belle, Si, Light Blue)
+[✓] "عود والا مہنگا پرفیوم"       → Oud Wood (Tom Ford) ranked first
+[✓] "Sauvage by Dior price?"      → Sauvage Rs 28,000 (English query also works)
+[✓] "گرمیوں میں تازہ ہلکی خوشبو" → Light Blue, Acqua di Gio (aquatic/fresh)
+[✓] Second run: "Index current — 20 perfumes already indexed" (idempotent)
 ```
 
 ---
