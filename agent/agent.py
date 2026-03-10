@@ -18,9 +18,8 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage
 
-from agent.graph import app
+from agent import app, warmup
 from agent.state import State
-from rag import build_index
 
 
 def main() -> None:
@@ -29,10 +28,7 @@ def main() -> None:
     print("  Type your question in Urdu. Type 'exit' to quit.")
     print("=" * 60)
 
-    # Build RAG index once at startup
-    print("\n[RAG] Building index ...")
-    build_index()
-    print("[RAG] Ready\n")
+    warmup()
 
     # Initial state
     state: State = {

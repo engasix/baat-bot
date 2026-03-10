@@ -424,6 +424,47 @@ Claude is instructed to set `transfer=True` when it detects:
 
 ---
 
+## System Warmup
+
+### Why warmup is necessary
+
+When the Python app starts, two heavyweight components are **not ready** until their first use:
+
+| Component | Cold start cost | Problem without warmup |
+|---|---|---|
+| Embedding model (`multilingual-e5-small`) | ~10-15s loading 120MB into RAM | First caller's RAG query is slow |
+| LLM API (`gpt-4o` / `claude-sonnet-4-6`) | ~1-2s connection + token generation | First response is noticeably slower |
+
+Without warmup, the **first caller** experiences a 10-15 second delay before hearing any response — unacceptable on a phone call where silence feels like a dead line.
+
+### What warmup does
+
+```python
+from agent import warmup
+warmup()   # call once at startup, before accepting any calls
+```
+
+Three steps run sequentially at startup:
+
+```
+1. build_index()     — ensures ChromaDB is populated, embedding model loads into RAM
+2. embed_query("warmup")  — forces model weights into RAM (no cold start on first real query)
+3. _llm.invoke(...)  — sends a dummy 1-token message to LLM to establish connection
+```
+
+After warmup completes (~12-15s on first run, ~3-5s on subsequent runs), both systems are hot in memory. Every caller from the first one onward gets consistent <1s response times.
+
+### How it integrates
+
+**Terminal test** (`agent/agent.py`) — warmup runs automatically before the input loop.
+
+**Phone system** (`main.py`) — call warmup in a thread before the ARI WebSocket connects:
+```python
+await asyncio.to_thread(warmup)   # non-blocking — runs while Asterisk connects
+```
+
+---
+
 ### Step 6 — Mobile SIP Client Setup
 
 Install **Linphone** (free) or **Zoiper** on mobile:
