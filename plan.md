@@ -1,7 +1,8 @@
-# Baat Bot — AI Voice Order-Taking Agent (Urdu / Pakistan)
+# Baat Bot — AI Voice Agent (Urdu / Pakistan)
 
 An AI voice agent for a **perfume e-commerce store** that receives phone calls in real-time,
-understands Urdu, answers product questions using RAG, and takes orders.
+understands Urdu, answers product questions using RAG, and transfers to a human agent when
+the caller is ready to place an order.
 Target latency: **~1 second** end-to-end response (like talking to a human).
 
 ---
@@ -40,7 +41,7 @@ Caller (Urdu) → SIP Phone → Asterisk (SIP/RTP)
                                    │
                           RTP Audio → Asterisk → Caller
                                    │
-                             Order stored in DB
+                    (ready to order?) → Transfer to Human Agent
 ```
 
 ### Why ARI over AGI
@@ -82,7 +83,7 @@ Caller speaks → RTP chunks → webrtcvad detects speech
 | RAG — Catalog | `data/perfumes.json` | Men's + women's perfume data |
 | TTS | Google Cloud TTS (`ur-PK`) | Free 1M chars/month, good Urdu |
 | Audio Conversion | `ffmpeg` | PCM ↔ formats |
-| Order Storage | PostgreSQL (Phase 2) | Persistent orders |
+| Call Transfer | Asterisk ARI redirect | Hand off to human agent for orders |
 
 ---
 
@@ -309,83 +310,100 @@ def search(query: str, gender_filter: str = None, top_k: int = 3) -> list[dict]:
     # returns list of matching perfume dicts
 ```
 
-#### `agent/state.py` — LangGraph Order State
+#### `agent/state.py` — LangGraph State
 
 ```python
-from typing import Annotated, Literal
-from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
-
-class OrderState(TypedDict):
-    messages: Annotated[list, add_messages]
-    order_items: list[dict]        # [{"name": "Blue de Chanel", "qty": 1, "price": 8500}]
-    delivery_address: str
-    retrieved_products: list[dict] # RAG results injected into Claude context
-    current_phase: Literal[
-        "greeting",
-        "browsing",               # user asking about perfumes → RAG active
-        "taking_order",
-        "collecting_address",
-        "confirming",
-        "done"
-    ]
-    confirmed: bool
+class State(TypedDict):
+    convo:       Annotated[list[BaseMessage], add_messages]
+    rag_context: str   # top-K perfume results injected into the system prompt each turn
+    transfer:    bool  # True = caller is ready to order → hand off to human agent
 ```
+
+**Why this state is intentionally simple — see "Human Agent Handoff" section below.**
 
 #### `agent/nodes.py` — LangGraph Nodes
 
 ```python
-# One node per phase. Each node:
-# 1. Builds a phase-specific system prompt in Urdu
-# 2. For browsing_node: calls RAG retriever first, injects results into Claude context
-# 3. Calls Claude (streaming)
-# 4. Extracts structured data from response (items, address, confirmation)
-# 5. Returns updated state + response text
+# Two nodes only:
+#
+# assistant_node(state) -> State
+#   1. Pulls last user message
+#   2. Runs RAG: retriever.search(query) → top-3 perfumes
+#   3. Injects results into Claude system prompt
+#   4. Calls Claude Sonnet 4.6 with full convo history
+#   5. Detects order intent in response → sets transfer=True
+#   6. Returns updated state with Claude's Urdu reply
+#
+# transfer_node(state) -> State
+#   1. Plays "connecting you to our team" message via TTS
+#   2. Triggers ARI call transfer to human agent extension
+#   3. Returns final state
 
-def greeting_node(state: OrderState) -> OrderState: ...
-def browsing_node(state: OrderState) -> OrderState: ...
-    # ↑ retriever.search(user_query) → top-3 perfumes
-    # ↑ injects results into Claude: "ہمارے پاس یہ خوشبو ہیں: ..."
-def taking_order_node(state: OrderState) -> OrderState: ...
-def collecting_address_node(state: OrderState) -> OrderState: ...
-def confirming_node(state: OrderState) -> OrderState: ...
-def done_node(state: OrderState) -> OrderState: ...
+def assistant_node(state: State) -> State: ...
+def transfer_node(state: State)  -> State: ...
 ```
 
 #### `agent/graph.py` — LangGraph Graph
 
 ```python
-# State machine transitions:
+# State machine:
 #
-#   [START]
-#      ↓
-#   greeting ──► browsing ──────────────────────────────────┐
-#      │            ↑ (more questions)                       │
-#      │            └──────────────────────────────────┐    │
-#      └──────────────────────────────────────────►  taking_order
-#                                                         ↓
-#                                               collecting_address
-#                                                         ↓
-#                                                    confirming
-#                                                    ↓        ↓
-#                                              (yes) done  (no) taking_order
+#   [START] → assistant ──► (transfer=False) ──► assistant  (loop)
+#                       └──► (transfer=True)  ──► transfer → [END]
 #
-# browsing_node uses RAG — retrieves relevant perfumes before calling Claude
-# Router decides: is user asking a question (→ browsing) or placing order (→ taking_order)
+# Single assistant node handles everything: greeting, browsing, Q&A.
+# When Claude detects order intent it sets transfer=True → human takes over.
 
-graph = StateGraph(OrderState)
-graph.add_node("greeting", greeting_node)
-graph.add_node("browsing", browsing_node)
-graph.add_node("taking_order", taking_order_node)
-graph.add_node("collecting_address", collecting_address_node)
-graph.add_node("confirming", confirming_node)
-graph.add_node("done", done_node)
-graph.add_conditional_edges("greeting", route_after_greeting)
-graph.add_conditional_edges("browsing", route_after_browsing)
-graph.add_conditional_edges("confirming", route_after_confirm)
-# ...compile
+graph = StateGraph(State)
+graph.add_node("assistant", assistant_node)
+graph.add_node("transfer",  transfer_node)
+graph.add_edge(START, "assistant")
+graph.add_conditional_edges("assistant", lambda s: "transfer" if s["transfer"] else "assistant")
+graph.add_edge("transfer", END)
 app = graph.compile()
 ```
+
+---
+
+## Why We Transfer to a Human Agent for Orders
+
+This is a deliberate architectural decision, not a limitation.
+
+### The problem with bot-taken orders
+
+| Risk | Detail |
+|---|---|
+| **STT errors** | Deepgram mishears an address digit or perfume name → wrong order shipped |
+| **Urdu variability** | Callers say perfume names differently — "ساواج", "سواج", "Sauvage" — hard to normalize reliably |
+| **Payment** | Confirming payment method over voice adds complexity and fraud risk |
+| **Edge cases** | "کیا یہ اصلی ہے؟", custom bundles, gift wrapping — a bot cannot handle all of these |
+
+### Why human handoff is better
+
+1. **Accuracy** — A human agent confirms name, address, and perfume spelling before processing. Zero wrong orders.
+2. **Trust** — Pakistani customers are more comfortable placing an order with a real person, especially for high-value perfumes (Rs 30k–50k).
+3. **Faster to build and test** — The bot only needs to answer questions well. No order state machine, no address parser, no confirmation loop.
+4. **Incremental** — Once the information-only flow works reliably on real calls, order automation can be added later with confidence.
+
+### What the bot does vs the human agent
+
+```
+Bot (AI)                          Human Agent
+─────────────────────────────     ──────────────────────────────────
+Answers any product question      Takes the actual order
+Recommends perfumes via RAG       Confirms name + address + qty
+Tells prices and availability     Processes payment
+Detects order intent              Ships the order
+Says "connecting you now..."      Handles complaints / returns
+Transfers the call                Does everything requiring judgment
+```
+
+### Trigger phrases that cause transfer
+
+Claude is instructed to set `transfer=True` when it detects:
+- `"لینا ہے"` / `"خریدنا ہے"` / `"آرڈر کرنا ہے"` (I want to buy/order)
+- `"کتنے کا ہے، لے لیتا ہوں"` (I'll take it)
+- Any clear purchase intent in context
 
 #### `main.py` — ARI App + Pipeline Orchestration
 
@@ -468,7 +486,8 @@ RTP_PORT=7000
 [ ] Linphone connected:        Shows "Registered" in app
 [ ] Dial 1000:                 Hear Urdu greeting (< 2s delay)
 [ ] Speak in Urdu:             Agent responds in < 1s after you stop
-[ ] Order flow complete:       greeting → browsing → order → address → confirm → done
+[ ] Product Q&A:               Ask about perfumes → bot answers with RAG results
+[ ] Transfer trigger:          Say "لینا ہے" → bot says "connecting you" → call transfers
 [ ] No audio gaps:             TTS sentence 1 plays while sentence 2 generates
 [ ] Barge-in works:            Interrupt bot mid-sentence → bot stops, listens
 [ ] No false barge-in:         Bot does not trigger itself (echo cooldown)
@@ -725,10 +744,10 @@ apt install asterisk
 
 ## Future Enhancements
 
-- [ ] Order storage in PostgreSQL
+- [ ] Automate order-taking once STT accuracy is proven reliable on real calls
+- [ ] Order storage in PostgreSQL (once bot takes orders directly)
 - [ ] Order confirmation via SMS (Twilio SMS API)
 - [ ] Admin dashboard to view orders
-- [ ] Menu with item names + prices (validate orders against menu)
 - [x] Barge-in support (caller interrupts bot mid-sentence) — see Phase 1 design
 - [ ] Upgrade to ElevenLabs TTS for more natural Urdu voice
 - [ ] Add support for multiple languages (Punjabi, Pashto)

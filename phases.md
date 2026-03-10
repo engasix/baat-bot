@@ -68,7 +68,7 @@ Phase 3  ──►  Connect Python to Asterisk via ARI
 Phase 4  ──►  RTP audio bridge + TTS welcome message (first audio out)
 Phase 5  ──►  STT — Deepgram Nova-3 streaming (speech → text) ✅ DONE
 Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval ✅ DONE
-Phase 7  ──►  LangGraph agent (text → Urdu response)
+Phase 7  ──►  LangGraph agent (Q&A + RAG + human handoff on order intent)
 Phase 8  ──►  TTS — Google Cloud (text → audio back to caller)
 Phase 9  ──►  Barge-in (caller interrupts bot)
 Phase 10 ──►  Live deployment (Pakistani phone number)
@@ -614,66 +614,59 @@ most_premium(n=3)                         # sorted by price_pkr descending
 
 ## Phase 7 — LangGraph Agent (Text → Urdu Response)
 
-**Goal:** Transcript from Phase 5 passes into the LangGraph state machine.
-The browsing node calls RAG before Claude. Tested independently with hardcoded
-input before wiring to the phone pipeline.
+**Goal:** Transcript from Phase 5 passes into the LangGraph agent. The agent
+answers product questions using RAG + Claude Sonnet 4.6 in Urdu. When the caller
+shows purchase intent, the agent says "connecting you now" and transfers the call
+to a human agent. Tested independently before wiring to the phone pipeline.
+
+### Why we transfer to a human agent for orders
+
+Taking an order fully over voice requires collecting a perfume name, quantity,
+full delivery address, and payment method — all in Urdu. Any STT error in the
+address (a single wrong digit in a house number or street name) means a wrong
+delivery. For high-value perfumes (Rs 14,000–52,000), this is a real business risk.
+
+A human agent verifies everything before processing. The bot's job is to answer
+questions so well that by the time the caller speaks to a human, they already
+know exactly what they want. This reduces the human agent's workload while
+keeping orders accurate and customers confident.
+
+This decision can be revisited once STT accuracy is proven reliable on real calls.
 
 ### `agent/state.py`
 
 ```python
-class OrderState(TypedDict):
-    messages: Annotated[list, add_messages]
-    order_items: list[dict]        # [{"name": "Blue de Chanel", "qty": 1, "price": 18500}]
-    delivery_address: str
-    retrieved_products: list[dict] # injected by browsing_node from RAG
-    current_phase: Literal[
-        "greeting", "browsing",
-        "taking_order", "collecting_address",
-        "confirming", "done"
-    ]
-    confirmed: bool
+class State(TypedDict):
+    convo:       Annotated[list[BaseMessage], add_messages]
+    rag_context: str   # top-K perfume results injected into system prompt each turn
+    transfer:    bool  # True = caller ready to order → hand off to human agent
 ```
 
-### `agent/nodes.py` — one node per phase
+### `agent/nodes.py`
 
 ```python
-def greeting_node(state)           -> OrderState: ...
-    # welcomes caller, asks what they're looking for
+def assistant_node(state: State) -> State:
+    # 1. Extract last user message
+    # 2. RAG: retriever.search(query) → top-3 perfumes → store in rag_context
+    # 3. Build system prompt with perfume catalog context
+    # 4. Call Claude Sonnet 4.6 with full convo history
+    # 5. Detect order intent ("لینا ہے", "آرڈر کرنا ہے", "خریدنا ہے")
+    # 6. If intent detected: set transfer=True, reply "connecting you now..."
+    # 7. Return updated state with Claude's Urdu reply
 
-def browsing_node(state)           -> OrderState: ...
-    # 1. calls retriever.search(user_query)
-    # 2. stores results in state["retrieved_products"]
-    # 3. builds context: "ہمارے پاس یہ خوشبو ہیں: ..."
-    # 4. calls Claude with catalog context + user question
-    # 5. Claude answers in Urdu using retrieved perfume data
-
-def taking_order_node(state)       -> OrderState: ...
-    # extracts item name + qty from user speech, appends to order_items
-
-def collecting_address_node(state) -> OrderState: ...
-    # asks for and stores delivery address
-
-def confirming_node(state)         -> OrderState: ...
-    # reads back order + address, asks for yes/no confirmation
-
-def done_node(state)               -> OrderState: ...
-    # thanks caller, saves order
+def transfer_node(state: State) -> State:
+    # Plays TTS "ابھی آپ کو ہمارے آرڈر ڈیپارٹمنٹ سے connect کرتی ہوں"
+    # Triggers ARI call redirect to human agent extension
 ```
 
 ### `agent/graph.py` — state machine
 
 ```python
-# Transitions:
+# [START] → assistant ──► (transfer=False) ──► assistant   (Q&A loop)
+#                     └──► (transfer=True)  ──► transfer → [END]
 #
-#   [START] → greeting
-#   greeting → browsing      (user asking a question)
-#   greeting → taking_order  (user directly places order)
-#   browsing → browsing      (more questions)
-#   browsing → taking_order  (ready to order)
-#   taking_order → collecting_address
-#   collecting_address → confirming
-#   confirming → done         (confirmed = True)
-#   confirming → taking_order (confirmed = False, re-ask)
+# Single assistant node handles greeting + all Q&A turns.
+# No phase routing needed — Claude manages context via conversation history.
 ```
 
 ### Verification
@@ -681,19 +674,23 @@ def done_node(state)               -> OrderState: ...
 ```bash
 uv run python -c "
 from agent.graph import app
-result = app.invoke({'current_phase': 'greeting', 'messages': [], 'order_items': [],
-                     'delivery_address': '', 'retrieved_products': [], 'confirmed': False})
-print(result['messages'][-1].content)
+from langchain_core.messages import HumanMessage
+result = app.invoke({
+    'convo': [HumanMessage('السلام علیکم، مردوں کے لیے اچھی خوشبو بتائیں')],
+    'rag_context': '',
+    'transfer': False,
+})
+print(result['convo'][-1].content)
 "
 ```
 
 ```
-[ ] Greeting returns Urdu welcome message
-[ ] 'مردوں کے لیے خوشبو بتائیں' → browsing_node → RAG → Claude answers with product details
-[ ] 'دو Blue de Chanel چاہیے' → taking_order_node → order_items updated
-[ ] Address collected correctly
-[ ] 'ہاں' confirmation → confirmed=True, phase=done
-[ ] 'نہیں' → returns to taking_order
+[ ] Urdu greeting returned on first turn
+[ ] 'مردوں کے لیے خوشبو بتائیں' → RAG runs → Claude answers with perfume names + prices
+[ ] 'عود والا کوئی ہے؟' → Oud Wood (Tom Ford) recommended
+[ ] 'Sauvage کتنے کا ہے؟' → Rs 28,000 price returned
+[ ] 'لینا ہے' / 'آرڈر کرنا ہے' → transfer=True, handoff message spoken
+[ ] transfer=False turns loop correctly (no premature exit)
 ```
 
 ---
