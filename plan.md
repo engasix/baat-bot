@@ -93,102 +93,108 @@ Caller speaks → RTP chunks → webrtcvad detects speech
 baat_bot/
 ├── plan.md
 ├── phases.md
+├── docker-compose.yml          # runs Asterisk container
 ├── pyproject.toml              # managed by uv
-├── .env                        # API keys
-├── config/
-│   ├── sip.conf                # copy → /usr/local/etc/asterisk/
-│   ├── extensions.conf         # copy → /usr/local/etc/asterisk/
-│   └── ari.conf                # copy → /usr/local/etc/asterisk/
+├── .env                        # API keys (never committed)
+├── config/                     # mounted into Asterisk Docker container
+│   ├── pjsip.conf              # SIP endpoints (PJSIP, not legacy sip.conf)
+│   ├── extensions.conf         # dialplan — ext 1000 → Stasis(baat_bot)
+│   ├── ari.conf                # ARI credentials
+│   └── http.conf               # enables ARI HTTP on port 8088
 ├── data/
-│   └── perfumes.json           # perfume catalog (men + women)
+│   ├── perfumes.json           # perfume catalog — source of truth
+│   └── chroma_db/              # ← generated at startup, NOT in git
 ├── rag/
 │   ├── __init__.py
-│   ├── catalog.py              # load & chunk perfumes.json
-│   ├── embedder.py             # multilingual-e5-small embeddings
-│   └── retriever.py            # ChromaDB search → top-K perfumes
+│   ├── catalog.py              # load perfumes.json + build bilingual search text
+│   ├── embedder.py             # multilingual-e5-small (local, ~120MB, supports Urdu)
+│   └── retriever.py            # ChromaDB build_index() / search() / cheapest() / most_premium()
 ├── agent/
-│   ├── __init__.py
-│   ├── state.py                # OrderState TypedDict
-│   ├── nodes.py                # LangGraph nodes (one per phase)
-│   └── graph.py                # Compiled LangGraph graph
+│   ├── __init__.py             # warmup() — preloads embedding model + LLM
+│   ├── state.py                # State TypedDict (convo, rag_context, transfer)
+│   ├── nodes.py                # assistant_node (RAG + LLM), transfer_node
+│   ├── graph.py                # LangGraph graph: START→assistant→(transfer|loop)
+│   └── agent.py                # standalone terminal test
 ├── services/
-│   ├── __init__.py
-│   ├── stt.py                  # Deepgram WebSocket streaming
-│   ├── tts.py                  # Google Cloud TTS, sentence-chunked
-│   └── rtp.py                  # RTP packet encode / decode
-└── main.py                     # ARI WebSocket app + pipeline orchestration
+│   ├── rtp.py                  # UDP audio stream (ExternalMedia bridge)
+│   ├── tts/
+│   │   ├── __init__.py         # active provider interface
+│   │   ├── google.py           # Google Chirp3-HD TTS (ur-IN, 8kHz)
+│   │   └── elevenlabs.py       # ElevenLabs TTS (alternative)
+│   └── stt/
+│       ├── __init__.py         # active provider interface
+│       ├── deepgram.py         # Deepgram Nova-3 (active)
+│       ├── google.py           # Google STT fallback
+│       └── openai.py           # OpenAI Whisper fallback
+└── main.py                     # ARI WebSocket app + full pipeline
 ```
 
 ---
 
 ## Phase 1 — Local Setup (Build & Test)
 
-### Step 1 — Install Asterisk on Mac
+### Step 1 — Run Asterisk via Docker
+
+Asterisk runs inside a Docker container (`andrius/asterisk:latest`). Config files from `config/` are mounted directly into the container — no installation on the host machine needed.
+
+**`docker-compose.yml`:**
+```yaml
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "8088:8088"
+      - "10000-10099:10000-10099/udp"
+    volumes:
+      - ./config/pjsip.conf:/etc/asterisk/pjsip.conf
+      - ./config/extensions.conf:/etc/asterisk/extensions.conf
+      - ./config/ari.conf:/etc/asterisk/ari.conf
+      - ./config/http.conf:/etc/asterisk/http.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
 
 ```bash
-brew install asterisk
-sudo asterisk -cvvv   # start in verbose console mode
+docker compose up -d          # start Asterisk in background
+docker compose logs -f        # watch logs
+docker compose down           # stop
 ```
+
+> `extra_hosts: host.docker.internal:host-gateway` allows Asterisk inside Docker to reach the Python app running on the host machine at `host.docker.internal:7000`.
 
 ---
 
-### Step 2 — Enable ARI
+### Step 2 — Asterisk Config Files (`config/`)
 
-**File:** `/usr/local/etc/asterisk/ari.conf`
+All config files live in `config/` and are mounted into the container. **Do not edit files inside the container** — edit the files in `config/` and restart Docker.
 
-```ini
-[general]
-enabled = yes
-pretty = yes
+| File | Purpose |
+|---|---|
+| `pjsip.conf` | SIP endpoints (PJSIP, not legacy chan_sip) |
+| `extensions.conf` | Dialplan — routes ext 1000 → Stasis(baat_bot) |
+| `ari.conf` | ARI user credentials |
+| `http.conf` | Enables ARI HTTP server on port 8088 |
 
-[baat_bot]
-type = user
-read_only = no
-password = ari_password123
-```
-
----
-
-### Step 3 — Configure SIP Extension
-
-**File:** `/usr/local/etc/asterisk/sip.conf`
-
-```ini
-[general]
-context = default
-allowguest = no
-bindport = 5060
-bindaddr = 0.0.0.0
-
-[mobile_client]
-type = friend
-secret = yourpassword123
-host = dynamic
-context = incoming
-dtmfmode = rfc2833
-allow = ulaw
-allow = alaw
-```
-
----
-
-### Step 4 — Configure Dial Plan (Stasis, not AGI)
-
-**File:** `/usr/local/etc/asterisk/extensions.conf`
-
+**`extensions.conf`** — the key dialplan entry:
 ```ini
 [incoming]
 exten => 1000,1,Answer()
 exten => 1000,n,Stasis(baat_bot)
 exten => 1000,n,Hangup()
 ```
+> `Stasis(baat_bot)` hands the call to our Python ARI app. All audio is handled via ExternalMedia RTP — nothing plays from the dialplan itself.
 
-> `Stasis(baat_bot)` hands the call to our ARI Python app.
-> No audio recording or playback happens in the dialplan — all audio is handled via ExternalMedia RTP.
+**`pjsip.conf`** — uses PJSIP (not legacy sip.conf):
+```ini
+; endpoint + auth + aor sections per extension
+; e.g. extensions 1001, 1002 for testing; 1000 is the bot entry point
+```
 
 ---
 
-### Step 5 — Python App Components
+### Step 3 — Python App Components
 
 #### `services/rtp.py` — RTP Packet Handling
 
@@ -421,6 +427,59 @@ Claude is instructed to set `transfer=True` when it detects:
 #    d. TTS PCM audio → RTP encoder → UDP back to Asterisk
 # 5. On phase=="done": hangup via ARI
 ```
+
+---
+
+## Building the ChromaDB Vector Index
+
+The `data/chroma_db/` folder is **not stored in git** — it is a generated artifact. Anyone cloning the repo must build it once before running the app.
+
+### Why it's not in git
+
+ChromaDB writes binary files (`data_level0.bin`, `chroma.sqlite3`) that change on every run, causing constant noise in git diffs and bloating the repo. Since the index is fully reproducible from `data/perfumes.json` in seconds, there is no reason to commit it.
+
+### How to build it
+
+**Option 1 — Run the RAG test script (recommended first time):**
+```bash
+uv run python test_rag.py
+```
+This builds the index AND verifies all queries are working correctly.
+
+**Option 2 — Build only (no test output):**
+```bash
+uv run python -c "from rag import build_index; build_index()"
+```
+
+**Option 3 — Just start the app:**
+```bash
+uv run python main.py        # build_index() is called inside warmup() at startup
+uv run python agent/agent.py # same — warmup() runs automatically
+```
+
+### What gets created
+
+```
+data/
+└── chroma_db/
+    ├── chroma.sqlite3                          # metadata + document store
+    └── <uuid>/
+        ├── data_level0.bin                     # HNSW vector index
+        ├── header.bin
+        ├── length.bin
+        └── link_lists.bin
+```
+
+### Rebuilding after catalog changes
+
+If you add or edit perfumes in `data/perfumes.json`, delete the old index and rebuild:
+
+```bash
+rm -rf data/chroma_db/
+uv run python test_rag.py
+```
+
+`build_index()` is idempotent — it skips already-indexed entries by ID, so it is safe to call on every startup without deleting first.
 
 ---
 
