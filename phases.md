@@ -68,7 +68,7 @@ Phase 3  ──►  Connect Python to Asterisk via ARI
 Phase 4  ──►  RTP audio bridge + TTS welcome message (first audio out)
 Phase 5  ──►  STT — Deepgram Nova-3 streaming (speech → text) ✅ DONE
 Phase 6  ──►  RAG — perfume catalog + ChromaDB + retrieval ✅ DONE
-Phase 7  ──►  LangGraph agent (Q&A + RAG + human handoff on order intent)
+Phase 7  ──►  LangGraph agent (Q&A + RAG + human handoff on order intent) ✅ DONE
 Phase 8  ──►  TTS — Google Cloud (text → audio back to caller)
 Phase 9  ──►  Barge-in (caller interrupts bot)
 Phase 10 ──►  Live deployment (Pakistani phone number)
@@ -612,7 +612,7 @@ most_premium(n=3)                         # sorted by price_pkr descending
 
 ---
 
-## Phase 7 — LangGraph Agent (Text → Urdu Response)
+## Phase 7 — LangGraph Agent (Text → Urdu Response) ✅ DONE
 
 **Goal:** Transcript from Phase 5 passes into the LangGraph agent. The agent
 answers product questions using RAG + Claude Sonnet 4.6 in Urdu. When the caller
@@ -874,9 +874,9 @@ agent/          — zero changes
 | 2 | uv project + folder structure + deps | ✅ Done |
 | 3 | ARI WebSocket — call control | ✅ Done |
 | 4 | RTP UDP bridge + TTS welcome message | ✅ Done |
-| 5 | Deepgram streaming STT + VAD | ⬜ Pending |
-| 6 | RAG — ChromaDB + perfume catalog | ⬜ Pending |
-| 7 | LangGraph state machine + Claude | ⬜ Pending |
+| 5 | Deepgram streaming STT + VAD | ✅ Done |
+| 6 | RAG — ChromaDB + perfume catalog | ✅ Done |
+| 7 | LangGraph state machine + Claude | ✅ Done |
 | 8 | Google TTS sentence-chunked + end-to-end | ⬜ Pending |
 | 9 | Barge-in with asyncio concurrency | ⬜ Pending |
 | 10 | Live Pakistani number deployment | ⬜ Pending |
