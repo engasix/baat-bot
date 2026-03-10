@@ -9,12 +9,14 @@ most_premium() — sorted by price descending
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import chromadb
 
 from rag import catalog, embedder
 
 COLLECTION_NAME = "perfumes"
-_CHROMA_PATH    = "./chroma_db"
+_CHROMA_PATH    = str(Path(__file__).parent.parent / "data" / "chroma_db")
 
 _client:     chromadb.PersistentClient | None = None
 _collection: chromadb.Collection       | None = None
