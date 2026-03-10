@@ -13,3 +13,6 @@ wheels/
 .env
 service-account.json
 .DS_Store
+
+# ChromaDB — generated at startup from data/perfumes.json, no need to commit
+data/chroma_db/
