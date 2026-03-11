@@ -43,6 +43,14 @@ def to_document(p: dict) -> str:
 
     notes_str = " ".join(p["scent_notes"])
 
+    sales = p.get("monthly_sales", 0)
+    if sales >= 60:
+        sales_tier = "سب سے زیادہ بکنے والا bestseller most popular top selling number one"
+    elif sales >= 30:
+        sales_tier = "مقبول popular selling well frequently bought"
+    else:
+        sales_tier = ""
+
     return (
         f"{p['name']} {p['brand']} "
         f"{gender_ur.get(p['gender'], p['gender'])} "
@@ -51,7 +59,8 @@ def to_document(p: dict) -> str:
         f"خوشبو scent notes: {notes_str} "
         f"{p['category']} "
         f"قیمت price {price} روپے PKR "
-        f"{price_tier}"
+        f"{price_tier} "
+        f"{sales_tier}"
     )
 
 

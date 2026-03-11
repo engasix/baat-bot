@@ -5,12 +5,18 @@ assistant_node — handles every turn: greeting, Q&A, RAG lookup, order detectio
 transfer_node  — placeholder for call transfer (prints message in terminal mode).
 """
 
+import re
+
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agent.state import State
 from rag import search
-from rag.retriever import cheapest, most_premium
+from rag.catalog import load as _load_catalog
+from rag.retriever import bestsellers, cheapest, most_premium
+
+# Total perfumes in catalog — loaded once at startup
+_CATALOG_TOTAL = len(_load_catalog())
 
 # To switch model, change only this string — e.g. "gpt-4o", "gemini-1.5-pro"
 # claude-sonnet-4-6
@@ -25,6 +31,7 @@ _llm = init_chat_model(
 _BASE_SYSTEM = """\
 آپ عائشہ ہیں — Pure Scents کی AI اسسٹنٹ جو فون پر اردو میں بات کرتی ہیں۔
 Pure Scents پاکستان کا ایک معیاری پرفیوم اسٹور ہے۔
+ہمارے کیٹالاگ میں اس وقت کل {{catalog_total}} پرفیوم موجود ہیں۔
 
 آپ کا کام:
 - صرف اردو میں جواب دیں (رومن اردو نہیں، اصل اردو رسم الخط)
@@ -67,7 +74,7 @@ def _build_system(rag_context: str) -> str:
         rag_section = _RAG_SECTION.format(context=rag_context)
     else:
         rag_section = ""
-    return _BASE_SYSTEM.format(rag_section=rag_section)
+    return _BASE_SYSTEM.format(catalog_total=_CATALOG_TOTAL, rag_section=rag_section)
 
 
 # ── RAG helper ─────────────────────────────────────────────────────────────────
@@ -90,12 +97,30 @@ def _needs_rag(query: str) -> bool:
     return not any(p in q_lower for p in _NO_RAG_PATTERNS)
 
 
+_URDU_NUMBERS = {
+    "ایک": 1, "دو": 2, "تین": 3, "چار": 4, "پانچ": 5,
+    "چھ": 6, "سات": 7, "آٹھ": 8, "نو": 9, "دس": 10,
+}
+
+
+def _extract_count(query: str) -> int:
+    """Extract requested count from query (digits or Urdu words). Default 3."""
+    match = re.search(r'\b([1-9][0-9]?)\b', query)
+    if match:
+        return min(int(match.group(1)), 10)
+    for word, num in _URDU_NUMBERS.items():
+        if word in query:
+            return num
+    return 3
+
+
 def _run_rag(query: str) -> str:
     """
     Decide which retrieval function to use based on the query,
     then format results as a compact text block for the system prompt.
     """
     q_lower = query.lower()
+    n = _extract_count(query)
 
     # Detect gender first — applies to both price-sorted and semantic queries
     gender = None
@@ -104,15 +129,19 @@ def _run_rag(query: str) -> str:
     elif any(w in q_lower for w in ["عورت", "عورتوں", "زنانہ", "خواتین", "women", "woman", "لڑکی", "girls"]):
         gender = "women"
 
-    # Price-sorted queries — use metadata sort but respect gender filter
-    if any(w in q_lower for w in ["سستا", "سستی", "کم قیمت", "cheap", "budget", "سب سے کم"]):
+    # Bestseller queries — sorted by monthly_sales
+    if any(w in q_lower for w in ["زیادہ بکنے", "مقبول", "bestseller", "best selling", "most popular", "top selling", "سب سے مشہور", "مشہور ترین"]):
+        all_best = bestsellers(n=10)
+        perfumes = [p for p in all_best if not gender or p["gender"] in (gender, "unisex")][:n]
+    # Price-sorted queries — sorted by price
+    elif any(w in q_lower for w in ["سستا", "سستی", "کم قیمت", "cheap", "budget", "سب سے کم"]):
         all_cheap = cheapest(n=10)
-        perfumes = [p for p in all_cheap if not gender or p["gender"] in (gender, "unisex")][:3]
+        perfumes = [p for p in all_cheap if not gender or p["gender"] in (gender, "unisex")][:n]
     elif any(w in q_lower for w in ["مہنگا", "مہنگی", "پریمیم", "premium", "luxury", "سب سے اچھا", "بہترین"]):
         all_premium = most_premium(n=10)
-        perfumes = [p for p in all_premium if not gender or p["gender"] in (gender, "unisex")][:3]
+        perfumes = [p for p in all_premium if not gender or p["gender"] in (gender, "unisex")][:n]
     else:
-        perfumes = search(query, n_results=3, gender=gender)
+        perfumes = search(query, n_results=n, gender=gender)
 
     if not perfumes:
         return ""

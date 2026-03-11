@@ -11,6 +11,6 @@ Usage:
     premium = most_premium(n=3)
 """
 
-from rag.retriever import build_index, cheapest, most_premium, search
+from rag.retriever import bestsellers, build_index, cheapest, most_premium, search
 
-__all__ = ["build_index", "search", "cheapest", "most_premium"]
+__all__ = ["build_index", "search", "cheapest", "most_premium", "bestsellers"]

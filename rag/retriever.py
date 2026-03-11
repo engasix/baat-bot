@@ -57,13 +57,14 @@ def build_index() -> None:
         embeddings = embeddings,
         metadatas  = [
             {
-                "name":      p["name"],
-                "brand":     p["brand"],
-                "gender":    p["gender"],
-                "price_pkr": p["price_pkr"],
-                "size_ml":   p["size_ml"],
-                "in_stock":  p["in_stock"],
-                "category":  p["category"],
+                "name":          p["name"],
+                "brand":         p["brand"],
+                "gender":        p["gender"],
+                "price_pkr":     p["price_pkr"],
+                "size_ml":       p["size_ml"],
+                "in_stock":      p["in_stock"],
+                "category":      p["category"],
+                "monthly_sales": p.get("monthly_sales", 0),
             }
             for p in to_add
         ],
@@ -129,3 +130,9 @@ def cheapest(n: int = 3) -> list[dict]:
 def most_premium(n: int = 3) -> list[dict]:
     """Return the n most expensive in-stock perfumes sorted by price."""
     return catalog.get_sorted_by_price(ascending=False, in_stock_only=True)[:n]
+
+
+def bestsellers(n: int = 3) -> list[dict]:
+    """Return the n best-selling in-stock perfumes sorted by monthly_sales descending."""
+    perfumes = [p for p in catalog.load() if p.get("in_stock", True)]
+    return sorted(perfumes, key=lambda p: p.get("monthly_sales", 0), reverse=True)[:n]
