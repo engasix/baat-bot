@@ -15,7 +15,7 @@ from rag.retriever import cheapest, most_premium
 # To switch model, change only this string — e.g. "gpt-4o", "gemini-1.5-pro"
 # claude-sonnet-4-6
 _llm = init_chat_model(
-    "gpt-4o", 
+    "claude-sonnet-4-6", 
     max_tokens=512
 )
 
