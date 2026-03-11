@@ -29,7 +29,7 @@ def synthesize(text: str) -> bytes:
         audio_config=texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
             sample_rate_hertz=8_000,
-            speaking_rate=1.2,
+            speaking_rate=1,
         ),
     )
     # Strip the 44-byte WAV header — return raw PCM

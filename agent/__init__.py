@@ -7,7 +7,6 @@ from agent.nodes import _llm
 from agent.state import State
 from rag import build_index
 from rag.embedder import embed_query
-
 __all__ = ["app", "State", "warmup"]
 
 
@@ -17,6 +16,7 @@ def warmup() -> None:
       1. Build / verify RAG index (loads embedding model into RAM)
       2. Send a dummy query through the embedding model
       3. Send a dummy message to the LLM (establishes connection, warms cache)
+      4. Pre-synthesize all filler phrases
 
     Call this once at startup. First real caller gets instant responses.
     """
