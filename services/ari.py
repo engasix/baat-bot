@@ -218,10 +218,11 @@ async def handle_stasis_start(session: aiohttp.ClientSession, event: dict) -> No
             reply = state["convo"][-1].content
             print(f"[Agent] ▶ {reply}")
 
-            # Speak the reply
-            pcm = await asyncio.to_thread(tts.synthesize, reply)
-            await play_audio(pcm)
-            audio_stream.drain()   # discard echo frames from agent reply
+            # Speak the reply sentence by sentence — shorter chunks reduce timing drift
+            for sentence in tts.split_sentences(reply):
+                pcm = await asyncio.to_thread(tts.synthesize, sentence)
+                await play_audio(pcm)
+            audio_stream.drain()   # discard echo frames after full reply
 
             # Hand off to human agent if caller wants to order
             if state.get("transfer"):
