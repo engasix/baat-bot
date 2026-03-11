@@ -67,10 +67,18 @@ class DeepgramSTT:
             conn.on(EventType.MESSAGE, on_message)
             conn.on(EventType.ERROR,   on_error)
 
-            # Separate sender thread feeds audio into the connection
+            # Separate sender thread feeds audio into the connection.
+            # When no audio arrives for 7s (LLM + TTS phase), sends a silent
+            # frame to keep the connection alive (prevents NET0001 timeout).
+            _SILENCE = b"\x00" * FRAME_BYTES
+
             def _sender():
                 while True:
-                    chunk = self._audio_q.get()
+                    try:
+                        chunk = self._audio_q.get(timeout=7)
+                    except queue.Empty:
+                        conn.send_media(_SILENCE)  # keepalive — Deepgram ignores silence
+                        continue
                     if chunk is None:
                         conn.send_close_stream()
                         return

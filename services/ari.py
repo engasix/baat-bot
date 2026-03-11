@@ -4,7 +4,11 @@ import os
 
 import aiohttp
 from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 
+from agent import app as agent_app
+from agent import warmup
+from agent.state import State
 from services import rtp as rtp_svc
 from services import tts
 from services import stt as stt_svc
@@ -68,6 +72,15 @@ async def hangup_channel(session: aiohttp.ClientSession, channel_id: str) -> Non
             print(f"[ARI] Channel already gone: {channel_id}")
         else:
             print(f"[ARI] Hung up  channel={channel_id} ({resp.status})")
+
+
+async def transfer_call(session: aiohttp.ClientSession, channel_id: str) -> None:
+    """Pop the channel out of Stasis and route it to the human agent extension."""
+    async with session.post(
+        f"{ARI_URL}/ari/channels/{channel_id}/continue",
+        json={"context": "default", "extension": "1001", "priority": 1},
+    ) as resp:
+        print(f"[ARI] Transferred to human agent ({resp.status})")
 
 
 async def setup_media_bridge(
@@ -176,24 +189,48 @@ async def handle_stasis_start(session: aiohttp.ClientSession, event: dict) -> No
 
     print(f"[TTS] {len(pcm):,} bytes PCM — playing welcome message ...")
     await play_audio(pcm)
+    audio_stream.drain()   # discard echo frames from welcome message
     print("[TTS] Welcome message done")
 
-    # Phase 5: stream inbound audio through STT
+    # Full pipeline: STT → Agent (RAG + LLM) → TTS
     stt = stt_svc.DeepgramSTT()
-    print("[STT] Listening — speak Urdu into the phone ...")
-    while True:
-        try:
-            frame = await asyncio.wait_for(audio_stream.receive(), timeout=5.0)
-            transcript = await stt.process(frame)
-            if transcript:
-                print(f"[STT] ▶ {transcript}")
-                pcm = await asyncio.to_thread(tts.synthesize, transcript)
-                await play_audio(pcm)
-        except asyncio.TimeoutError:
-            print("[STT] No audio — call ended")
-            break
+    state: State = {"convo": [], "rag_context": "", "transfer": False}
 
-    stt.close()
+    print("[Agent] Listening — speak Urdu into the phone ...")
+    try:
+        while True:
+            try:
+                frame = await asyncio.wait_for(audio_stream.receive(), timeout=5.0)
+            except asyncio.TimeoutError:
+                print("[STT] No audio — call ended")
+                break
+
+            transcript = await stt.process(frame)
+            if not transcript:
+                continue
+
+            print(f"[STT] ▶ {transcript}")
+
+            # Run agent (sync) in a thread — keeps the event loop free
+            state["convo"] = state["convo"] + [HumanMessage(content=transcript)]
+            state = await asyncio.to_thread(agent_app.invoke, state)
+
+            reply = state["convo"][-1].content
+            print(f"[Agent] ▶ {reply}")
+
+            # Speak the reply
+            pcm = await asyncio.to_thread(tts.synthesize, reply)
+            await play_audio(pcm)
+            audio_stream.drain()   # discard echo frames from agent reply
+
+            # Hand off to human agent if caller wants to order
+            if state.get("transfer"):
+                await transfer_call(session, channel_id)
+                break
+
+            state["transfer"] = False
+    finally:
+        stt.close()
 
 
 # ── WebSocket loop ────────────────────────────────────────────────────────────
@@ -232,6 +269,9 @@ async def run_websocket(session: aiohttp.ClientSession) -> None:
 async def run() -> None:
     """Start the UDP server then connect to ARI with automatic reconnection."""
     await audio_stream.start(host="0.0.0.0", port=RTP_PORT)
+
+    # Preload embedding model + LLM before the first caller connects
+    await asyncio.to_thread(warmup)
 
     auth  = aiohttp.BasicAuth(ARI_USER, ARI_PASS)
     delay = RECONNECT_DELAY

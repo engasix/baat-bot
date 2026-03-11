@@ -107,6 +107,18 @@ class UdpAudioStream:
         self._seq       = (self._seq + 1) & 0xFFFF
         self._timestamp = (self._timestamp + FRAME_SAMPLES) & 0xFFFFFFFF
 
+    def drain(self) -> None:
+        """Discard all queued inbound packets accumulated during TTS playback (echo suppression)."""
+        discarded = 0
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+                discarded += 1
+            except asyncio.QueueEmpty:
+                break
+        if discarded:
+            print(f"[RTP] Drained {discarded} echo frames")
+
     def stop(self) -> None:
         if self._transport:
             self._transport.close()
