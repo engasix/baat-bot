@@ -16,3 +16,6 @@ service-account.json
 
 # ChromaDB — generated at startup from data/perfumes.json, no need to commit
 data/chroma_db/
+
+# Claude Code instructions (local only)
+CLAUDE.md
