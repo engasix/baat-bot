@@ -4,6 +4,12 @@ An autonomous voice agent that handles customer calls for e-commerce stores in r
 
 ---
 
+## Demo
+
+[![Baat Bot — AI Voice Agent Demo](https://img.youtube.com/vi/OYgPYx1ogZg/maxresdefault.jpg)](https://www.youtube.com/watch?v=OYgPYx1ogZg)
+
+---
+
 ## How It Works
 
 > Customer calls → greeting → product Q&A (RAG) → place order → confirm items + address → save order → goodbye
