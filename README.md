@@ -27,9 +27,9 @@ Barge-in supported — customer can interrupt the bot mid-sentence at any time.
   Caller (Urdu)  ──────────────────►  Asterisk (ARI)
        ▲                                    │
        │                         ┌──────────┴──────────┐
-       │                         │ WebSocket            │ RTP/UDP
-       │                         │ (call control)       │ (raw audio)
-       │                         ▼                      ▼
+       │                         │ WebSocket           │ RTP/UDP
+       │                         │ (call control)      │ (raw audio)
+       │                         ▼                     ▼
        │                    ┌─────────────────────────────┐
        └────────────────────│      Python App             │
           audio response    │      main.py                │
